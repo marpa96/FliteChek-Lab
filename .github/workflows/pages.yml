@@ -1,0 +1,40 @@
+# Hosts the rethink branch on GitHub Pages so it can be installed on iPhone/iPad over normal HTTPS.
+# Each deploy stamps the commit into the build number and offline cache name, so
+# Settings → Offline & backup → "Update app & checklists" picks it up.
+name: Deploy FliteChek Lab to GitHub Pages
+on:
+  push:
+    branches: [rethink]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm test
+      - name: Stamp build
+        run: |
+          short=${GITHUB_SHA::7}
+          sed -i "s/const CACHE='flitechek-lab-1'/const CACHE='flitechek-lab-$short'/; s/build:'lab-1'/build:'lab-$short'/" web/sw.js
+          sed -i "s/const BUILD='lab-1'/const BUILD='lab-$short'/" web/app.js
+          grep -q "flitechek-lab-$short" web/sw.js
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deployment
+        uses: actions/deploy-pages@v4

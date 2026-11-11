@@ -83,6 +83,12 @@ not yet** — it still rejects unknown fields, so real changes files need that b
 
 ## Try it
 
+**On iPhone/iPad:** open https://marpa96.github.io/FliteChek-Lab/ in Safari → Share → Add to Home Screen.
+Pushing to `rethink` redeploys it; in the app, Settings → Offline & backup → **Update app & checklists**
+switches to the newest build (progress is kept).
+
+**On the Mac:**
+
 ```sh
 npm ci && npm test        # 93 tests, incl. resolver + overlays
 python3 -m http.server 8092 --directory web   # then open http://localhost:8092

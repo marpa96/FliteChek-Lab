@@ -496,7 +496,7 @@ document.addEventListener('click',async e=>{
     case 'library-download':return downloadLibrary();
     case 'library-install':if(libraryCandidate&&change(s=>{installLibrary(s,libraryCandidate);if(librarySource)s.librarySource=librarySource;},false)){libraryCandidate=null;libraryMessage='Library installed. Active runs keep their existing version.';render();}return;
     case 'update-checklists':{if(locked||libraryBusy)return;libraryBusy=true;render();notice('Checking GitHub for your latest checklists…');try{const result=await updateChecklists();state=validateState(JSON.parse(localStorage.getItem(KEY)));notice(result.count+' checklists up to date. Active runs keep their existing version.');}catch(err){notice(err.message);}finally{libraryBusy=false;render();}return;}
-    case 'app-update':location.href=updateURL(location.href);return;
+    case 'app-update':return updateApp();
     case 'offline-check':return checkOffline(true);
     case 'backup':return download('FliteChek-backup.json',JSON.stringify(state,null,2),'application/json');
     case 'import-backup':$('#backup-import').value='';$('#backup-import').click();return;
@@ -544,6 +544,21 @@ setInterval(()=>{
   if(outside&&elapsed>=6)jump(line);
 },250);
 
+// Hosted builds (GitHub Pages) update in place: fetch the new service worker, switch to it, reload.
+// The Mac launcher keeps its own /install update page.
+async function updateApp(){
+  if(!location.hostname.endsWith('github.io')){location.href=updateURL(location.href);return;}
+  if(page==='run'&&run()&&!complete(run())&&confirmAction!=='app-update'){confirmAction='app-update';notice('A checklist is in progress. Tap Update app again to update now — your progress is kept.');return;}
+  try{
+    const reg=await navigator.serviceWorker.getRegistration();if(!reg)throw new Error('Offline support is not set up yet. Open Settings → Offline & backup first.');
+    notice('Checking for a new version…');await reg.update();
+    const worker=reg.waiting||reg.installing;
+    if(!worker){notice('You have the latest version (build '+BUILD+').');return;}
+    navigator.serviceWorker.addEventListener('controllerchange',()=>location.reload(),{once:true});
+    const apply=()=>reg.waiting?.postMessage({type:'APPLY_UPDATE'});
+    if(reg.waiting)apply();else worker.addEventListener('statechange',()=>{if(worker.state==='installed')apply();});
+  }catch(err){notice('Update failed: '+err.message);}
+}
 async function checkOffline(requestPersistence=false){
   try{
     if(!isSecureContext||!('serviceWorker' in navigator))throw new Error('Open the HTTPS address from the setup guide to install offline support.');
