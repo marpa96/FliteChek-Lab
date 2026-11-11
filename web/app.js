@@ -9,8 +9,11 @@ import {parse,latest,newState,tasks,current,complete,setItem,restore,validateSta
 import {families,resolve,reason,shortLabel,flightLabel,signature,flightFrom,match,DIMENSIONS} from './resolver.js';
 import {compose} from './overlay.js';
 import {addDemo,removeDemo,hasDemo} from './demo.js';
+import {challengeResponse,waitSeconds,squawk,hasBlank,highlight,appliesToConflict,isFrontMatter} from './smart.js';
+import {diff,summary} from './diff.js';
 
 const BUILD='lab-1';
+const PREF={view:'flitechek.view.v1',speak:'flitechek.speak.v1'};
 const FLIGHT_ORDER=['Planning','Pre-Flight','Ground Ops','In-Flight','Post-Flight']; // the order you use them
 const DEFAULT_LIBRARY='https://raw.githubusercontent.com/marpa96/Flight-Checklists/flitechek-library/library.flitechek.json';
 const KEY='flitechek.state.v1', $=s=>document.querySelector(s), main=$('#main');
@@ -18,6 +21,8 @@ let state, page='home', locked=false, confirmAction=null, backupCandidate=null;
 let libraryCandidate=null,librarySource='',libraryMessage='',libraryBusy=false,checkedLibraryThisSession=false;
 let fuelStep=0,fuelLine=null,fuelError='';
 let versionsFor=null, editingAircraft=null, flightDraft=null, detailsOpen=false, undo=null, undoTimer=null;
+let view='list',speakOn=false,diffFor=null,diffAgainst='base',lastCheckAt=0;const timers={};
+try{view=localStorage.getItem(PREF.view)==='glance'?'glance':'list';speakOn=localStorage.getItem(PREF.speak)==='on';}catch{}
 let lastTouch=Date.now(), dragging=false, scrollTimer, offlineReady=false, persistence=false, wakeLock=null;
 const escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const button=(action,text,cls='',extra='')=>`<button type="button" data-action="${action}" class="${cls}" ${extra}>${text}</button>`;
@@ -39,6 +44,19 @@ const allFamilies=()=>families(state.checklists,checklistGroup);
 const familyOf=key=>allFamilies().find(f=>f.key===key);
 const familyOfChecklist=c=>allFamilies().find(f=>f.versions.includes(c)||f.versions.some(v=>v.id===c?.id));
 const resolveFamily=f=>resolve(f,flight(),state.choices?.[f.key]);
+const familyDone=f=>f.versions.some(v=>state.runs[v.id]&&complete(state.runs[v.id]));
+const familyStarted=f=>f.versions.some(v=>state.runs[v.id]&&Object.keys(state.runs[v.id].states).length);
+function phases(fams){return [...new Set([...FLIGHT_ORDER,...GROUPS,...(state.libraryFolders||[]).map(g=>g.replace(/^\d+\.\s+/,'')),...fams.map(f=>f.group)])].filter(g=>g!=='Emergency'&&fams.some(f=>f.group===g));}
+function orderedFamilies(){const fams=allFamilies().filter(f=>!f.emergency);return phases(fams).flatMap(g=>fams.filter(f=>f.group===g));}
+// The next checklist to run: the first unfinished, resolvable one after the last one you finished.
+function nextUp(){
+  const list=orderedFamilies();let last=-1;list.forEach((f,i)=>{if(familyDone(f))last=i;});
+  const ready=f=>!familyDone(f)&&resolveFamily(f).status==='resolved';
+  return list.slice(last+1).find(ready)||list.find(ready)||null;
+}
+function composeWith(res){
+  return compose(latest(res.version.checklist).markdown,res.overlays.map(o=>({markdown:latest(o.checklist).markdown,label:shortLabel(o)}))).markdown;
+}
 function composeFor(result){
   const base=result.version.checklist;
   const overlays=result.overlays.map(o=>({markdown:latest(o.checklist).markdown,label:shortLabel(o)}));
@@ -76,7 +94,7 @@ function openFamily(key,{versionId=null,force=false}={}){
     }
     s.active=base.id;
   },false))return;
-  page='run';confirmAction=null;detailsOpen=false;render();restorePosition();
+  page='run';confirmAction=null;detailsOpen=false;render();restorePosition();speakCurrent();
 }
 function restartActive(){
   const c=active();if(!c)return;const f=familyOfChecklist(c);
@@ -87,12 +105,12 @@ function restartActive(){
 // ---------- rendering ----------
 function render(){
   if(!state)return;
-  const views={home,flight:flightSetup,hangar,versions,run:runner,emergency,settings,'library-import':libraryImport,fuel:fuelCalculator,history,setup};
+  const views={home,flight:flightSetup,hangar,versions,run:runner,emergency,settings,diff:diffPage,'library-import':libraryImport,fuel:fuelCalculator,history,setup};
   if(page==='run'&&!active())page='home';
   const oldScroll=main.scrollTop;
   main.innerHTML=(views[page]||home)();
   main.dataset.page=page;
-  if(page==='run')main.scrollTop=oldScroll;
+  if(page==='run')main.scrollTop=view==='glance'?0:oldScroll;
   renderHeader();renderBottom();updateReturn();updateWakeLock();
 }
 function statusHTML(res){
@@ -110,25 +128,44 @@ function flightCard(){
   return `<button type="button" class="flight-card" data-action="flight"><span class="eyebrow">TODAY’S FLIGHT</span><span class="tail">${escape(f.tail||'—')}</span><span class="flight-line">${escape([f.model,f.operator].filter(Boolean).join(' · '))}</span><span class="flight-line">${escape([f.airfield,f.rules,...(f.conditions||[]),...(f.equipment||[])].filter(Boolean).join(' · ')||'No airport or rules set')}</span><span class="go">Change</span></button>`;
 }
 function home(){
+  const fams=orderedFamilies(),f=state.flight,next=f?nextUp():null;
   let html='<div class="home-side">'+flightCard();
   const c=active(),r=run();
-  if(c&&r&&!c.emergency){const t=tasks(r),done=t.filter(b=>r.states[b.line]==='done').length;html+=`<button type="button" class="resume-card" data-action="resume"><span class="eyebrow">IN PROGRESS</span><strong>${escape(c.title)}</strong><span>${done} of ${t.length} · ${escape(r.versionLabel||'')}</span><span class="go">Resume →</span></button>`;}
+  if(c&&r&&!c.emergency&&!complete(r)){const t=tasks(r),done=t.filter(b=>r.states[b.line]==='done').length;html+=`<button type="button" class="resume-card" data-action="resume"><span class="eyebrow">IN PROGRESS</span><strong>${escape(c.title)}</strong><span>${done} of ${t.length} · ${escape(r.versionLabel||'')}</span><span class="go">Resume →</span></button>`;}
+  else if(next){const res=resolveFamily(next);html+=`<button type="button" class="next-card" data-action="open-family" data-key="${escape(next.key)}"><span class="eyebrow">NEXT UP · ${escape(next.group.toUpperCase())}</span><strong>${escape(next.title)}</strong><small>${statusHTML(res)}</small><span class="go">Start →</span></button>`;}
+  html+=readiness();
   if(libraryCandidate)html+=`<div class="banner info">A checklist update was downloaded and validated. ${button('library-import','Review update →','outline full')}</div>`;
   html+='</div><div class="home-main">';
-  const fams=allFamilies().filter(f=>!f.emergency);
-  const groups=[...new Set([...FLIGHT_ORDER,...GROUPS,...(state.libraryFolders||[]).map(g=>g.replace(/^\d+\.\s+/,'')),...fams.map(f=>f.group)])].filter(g=>g!=='Emergency');
+  const groups=phases(fams);
+  if(f&&groups.length)html+=timeline(groups,fams);
   for(const g of groups){
-    const list=fams.filter(f=>f.group===g);if(!list.length)continue;
-    html+=`<section class="phase"><h2>${escape(g)}</h2>`;
-    for(const f of list){
-      const res=resolveFamily(f),running=f.versions.some(v=>state.runs[v.id]);
-      html+=`<button type="button" class="procedure ${res.status}" data-action="open-family" data-key="${escape(f.key)}"><span class="copy"><strong>${escape(f.title)}${running?' <span class="dot" aria-label="in progress"></span>':''}</strong><small>${statusHTML(res)}</small></span><span class="chevron" aria-hidden="true">›</span></button>`;
+    html+=`<section class="phase" id="phase-${escape(g.replace(/\W+/g,'-'))}"><h2>${escape(g)}</h2>`;
+    for(const fam of fams.filter(x=>x.group===g)){
+      const res=resolveFamily(fam),done=familyDone(fam),started=!done&&familyStarted(fam);
+      html+=`<button type="button" class="procedure ${res.status} ${done?'complete':''}" data-action="open-family" data-key="${escape(fam.key)}"><span class="state-mark" aria-hidden="true">${done?'✓':started?'◐':''}</span><span class="copy"><strong>${escape(fam.title)}</strong><small>${done?'<span class="ok">Done · </span>':started?'<span class="muted">In progress · </span>':''}${statusHTML(res)}</small></span><span class="chevron" aria-hidden="true">›</span></button>`;
     }
     html+='</section>';
   }
   if(!fams.length)html+='<p class="help">No checklists installed. Open Settings → Import / update checklists.</p>';
   html+=`<div class="home-foot">${button('update-checklists',libraryBusy?'Updating…':'Update checklists from GitHub','outline full',libraryBusy?'disabled':'')}</div></div>`;
   return html;
+}
+// Where you are in the flight, phase by phase.
+function timeline(groups,fams){
+  return `<nav class="timeline" aria-label="Flight phases">${groups.map(g=>{
+    const list=fams.filter(f=>f.group===g),done=list.filter(familyDone).length;
+    const status=done===list.length?'done':(done||list.some(familyStarted))?'now':'';
+    return button('jump-phase',`<span class="tl-bar"><span style="width:${Math.round(done/list.length*100)}%"></span></span><span class="tl-name">${escape(g)}</span><span class="tl-count">${status==='done'?'✓':`${done}/${list.length}`}</span>`,`tl ${status}`,`data-phase="${escape(g.replace(/\W+/g,'-'))}" aria-label="${escape(g)}: ${done} of ${list.length} done"`);
+  }).join('')}</nav>`;
+}
+// Before you fly: does every checklist — emergencies included — have exactly one version?
+function readiness(){
+  if(!state.flight)return '';
+  const all=allFamilies().map(f=>({f,r:resolveFamily(f)})),bad=all.filter(x=>x.r.status!=='resolved');
+  const conflicts=all.filter(x=>x.r.status==='resolved'&&appliesToConflict(latest(x.r.version.checklist).markdown,x.r.version.checklist.metadata));
+  for(const x of conflicts)bad.push({f:x.f,r:{...x.r,conflict:appliesToConflict(latest(x.r.version.checklist).markdown,x.r.version.checklist.metadata)}});
+  if(!bad.length)return `<div class="readiness good"><strong>✓ All ${all.length} checklists ready</strong><span>Every checklist, emergencies included, has exactly one version for ${escape(state.flight.tail)}.</span></div>`;
+  return `<div class="readiness"><strong>⚠ ${bad.length} of ${all.length} need attention</strong><span>Sort these out on the ground:</span>${bad.map(x=>button('open-family',`<span>${x.f.emergency?'△ ':''}${escape(x.f.title)}</span><small>${x.r.conflict?`<span class="warn">Text says ${escape(x.r.conflict.says.join(', '))} — filed as ${escape(x.r.conflict.filed.join('/'))}</span>`:statusHTML(x.r)}</small>`,'ready-item',`data-key="${escape(x.f.key)}"`)).join('')}</div>`;
 }
 function flightSetup(){
   const hangar=state.hangar||[];
@@ -188,6 +225,7 @@ function versions(){
     else html+=confirmAction==='force:'+v.id?`<div class="banner bad">This version is <strong>not for this flight</strong>. Open it anyway?<div class="row">${button('force-version','Open anyway','danger',`data-id="${escape(v.id)}" data-key="${escape(f.key)}"`)}${button('cancel','Cancel','outline')}</div></div>`:button('ask-force','Open anyway…','quiet',`data-id="${escape(v.id)}"`);
     html+='</div>';
   }
+  if(res.status==='resolved'&&(f.overlays.length||(state.hangar||[]).length>1))html+=button('diff-family','What’s different? Compare versions','outline full',`data-key="${escape(f.key)}"`);
   if(f.overlays.length){html+=`<h2>Changes files</h2><p class="help">Layered onto the base version when they match the flight.</p>`;for(const o of f.overlays){const m=match(o.metadata,flight());html+=`<div class="card version ${m.applies?'fits':'nofit'}"><strong>${escape(o.title)}</strong><p class="help">${escape(describe(o.metadata))}</p><p class="${m.applies?'ok':'muted'}">${m.applies?'✓ Applied for this flight':'Not applied — '+escape(whyNot(m))}</p></div>`;}}
   return html;
 }
@@ -197,6 +235,60 @@ function headingHTML(b){
   const level=Math.min(6,Math.max(2,b.level));
   return `<h${level} data-line="${b.line}" id="line-${b.line}" class="source-heading level-${b.level}">${renderInline(/checklist complete/i.test(b.text)?'Completion':b.text)}</h${level}>`;
 }
+// ---------- smart items ----------
+const clock=s=>`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+const plain=t=>String(t).replace(/\*\*|`|\[\^?\d+\]/g,'').replace(/\[([^\]]+)\]\([^)]*\)/g,'$1').trim();
+// Show "Control -- ACTION" like a printed cockpit checklist; highlight values, codes and blanks.
+function itemHTML(text,value){
+  const code=squawk(text);
+  const R=t=>{let html=highlight(renderInline(t,{links:false}),{code});
+    if(hasBlank(t))html=html.replace(/<code>_{3,}<\/code>|_{3,}/,value?`<span class="filled">${escape(value)}</span>`:'<span class="blank-mark" aria-label="value to record">＿＿＿</span>');
+    return html;};
+  const cr=challengeResponse(text);
+  if(!cr)return R(text);
+  return `<span class="cr${plain(cr.response).length>26?' stack':''}"><span class="ch">${R(cr.challenge)}</span><span class="leader" aria-hidden="true"></span><span class="rs">${R(cr.response)}</span></span>`;
+}
+function widgetsHTML(b,r,text){
+  let html='';const secs=waitSeconds(text);
+  if(secs&&r.states[b.line]!=='done'){
+    const t=timers[state.active+':'+b.line],left=t?Math.max(0,Math.ceil((t.end-Date.now())/1000)):secs;
+    html+=button('timer',`<span aria-hidden="true">${t?(left?'⏱':'⏰'):'▶'}</span><span data-timer="${b.line}">${t&&!left?'TIME':clock(left)}</span>`,`widget timer ${t?(left?'running':'finished'):''}`,`data-line="${b.line}" data-seconds="${secs}" aria-label="${t?'Reset':'Start'} ${clock(secs)} timer"`);
+  }
+  if(hasBlank(text))html+=`<label class="widget blank"><span>Record</span><input data-value-line="${b.line}" value="${escape(r.values?.[b.line]??'')}" inputmode="decimal" autocomplete="off" autocorrect="off" enterkeyhint="done" placeholder="value" maxlength="24"></label>`;
+  return html?`<div class="task-widgets">${html}</div>`:'';
+}
+// Task lines that sit under a "Memory items" / "Immediate action" heading.
+function memoryLines(blocks){
+  const set=new Set();let level=null;
+  for(const b of blocks){
+    if(b.kind==='heading')level=/memory items|immediate action/i.test(b.text)?b.level:(level!==null&&b.level>level?level:null);
+    else if(level!==null&&b.kind==='task')set.add(b.line);
+  }
+  return set;
+}
+// Glance: one item fills the screen and the whole card is the check button.
+function glanceHTML(blocks,r,c){
+  const line=current(r),i=blocks.findIndex(b=>b.line===line),b=blocks[i];
+  let start=i-1;while(start>=0&&blocks[start].kind!=='task')start--;
+  // Warnings and notes right before the item must still be read first.
+  const context=blocks.slice(start+1,i).filter(x=>x.callout).map(x=>blockHTML(x,r,false)).join('');
+  const t=tasks(r),n=t.findIndex(x=>x.line===line)+1,origin=r.origins?.[line];
+  const text=fuelText(b.text.replace(FUEL_LINK,'Calculate fuel endurance'),r.calculators?.fuel),cr=challengeResponse(text),code=squawk(text);
+  const R=x=>highlight(renderInline(x,{links:false})); // the code gets its own big digits below
+  const memory=memoryLines(blocks).has(line),pending=r.states[line]==='pending';
+  const next=t.find(x=>!r.states[x.line]&&x.line!==line);
+  return `${context}<button type="button" class="glance-card ${memory?'memory':''} ${pending?'pending':''}" data-action="check" data-line="${line}" aria-label="Check: ${escape(plain(text))}">
+<span class="g-top"><span class="eyebrow">${memory?'MEMORY ITEM':escape(b.sectionPath.join(' › ')||c.title)}</span><span class="g-count">${n} / ${t.length}</span></span>
+${origin?`<span class="origin">${escape(origin)}</span>`:''}${pending?'<span class="chip">Skipped earlier</span>':''}
+${cr?`<span class="g-ch">${R(cr.challenge)}</span><span class="g-rs">${R(cr.response)}</span>`:`<span class="g-rs single">${itemHTML(text,r.values?.[line])}</span>`}
+${code?`<span class="g-code" aria-label="Code ${code}">${code.split('').map(d=>`<span>${d}</span>`).join('')}</span>`:''}
+<span class="g-hint">Tap anywhere on this card to check</span></button>
+${widgetsHTML(b,r,text)}${webLinks(text).map(link=>`<a class="external-link" data-web-link href="${escape(link.url)}" target="_blank" rel="noopener noreferrer">${escape(link.label)} ↗</a>`).join('')}
+<p class="g-next">${next?`<span class="eyebrow">NEXT</span> ${itemHTML(fuelText(next.text,r.calculators?.fuel),r.values?.[next.line])}`:'<span class="eyebrow">LAST ITEM</span>'}</p>`;
+}
+function frontMatterHTML(lines){
+  return `<details class="front-matter"><summary>${lines.map(l=>renderInline(l.replace(/\*\*([^*]+):\*\*\s*/,'').replace(/\*\*/g,''),{links:false})).map(t=>`<span>${t}</span>`).join('')}</summary>${lines.map(l=>`<p>${renderInline(l)}</p>`).join('')}</details>`;
+}
 function blockHTML(b,r,memory){
   const origin=r.origins?.[b.line];
   const tag=origin?`<span class="origin" title="Added by changes for ${escape(origin)}">${escape(origin)}</span>`:'';
@@ -204,7 +296,7 @@ function blockHTML(b,r,memory){
     const status=r.states[b.line],now=current(r)===b.line;
     const calculator=b.text.includes(FUEL_LINK);
     const text=fuelText(b.text.replace(FUEL_LINK,'Calculate fuel endurance'),r.calculators?.fuel);
-    return `<div class="task ${status==='done'?'done':''} ${status==='pending'?'pending':''} ${now?'current':''} ${memory?'memory':''} ${origin?'added':''}" id="line-${b.line}" data-line="${b.line}" style="--depth:${Math.min(b.depth,8)}"><button type="button" class="check" data-action="check" data-line="${b.line}" aria-pressed="${status==='done'}"><span class="box" aria-hidden="true">${status==='done'?'✓':status==='pending'?'◷':''}</span><span class="item-copy">${now&&b.sectionPath.length?`<span class="item-context">${escape(b.sectionPath.join(' › '))}</span>`:''}${tag}${renderInline(text,{links:false})}</span></button><button type="button" class="pending-button" data-action="pending" data-line="${b.line}" aria-label="${status==='pending'?'Return item to checklist':'Do later'}">${status==='pending'?'↩':'◷'}</button>${webLinks(text).map(link=>`<a class="external-link task-reference" data-web-link href="${escape(link.url)}" target="_blank" rel="noopener noreferrer">${escape(link.label)} ↗</a>`).join('')}${calculator?button('fuel-open',r.calculators?.fuel?'Recalculate fuel endurance →':'Calculate fuel endurance →','outline full calculator-link',`data-line="${b.line}"`):''}</div>`;
+    return `<div class="task ${status==='done'?'done':''} ${status==='pending'?'pending':''} ${now?'current':''} ${memory?'memory':''} ${origin?'added':''}" id="line-${b.line}" data-line="${b.line}" style="--depth:${Math.min(b.depth,8)}"><button type="button" class="check" data-action="check" data-line="${b.line}" aria-pressed="${status==='done'}"><span class="box" aria-hidden="true">${status==='done'?'✓':status==='pending'?'◷':''}</span><span class="item-copy">${now&&b.sectionPath.length?`<span class="item-context">${escape(b.sectionPath.join(' › '))}</span>`:''}${tag}${itemHTML(text,r.values?.[b.line])}</span></button><button type="button" class="pending-button" data-action="pending" data-line="${b.line}" aria-label="${status==='pending'?'Return item to checklist':'Do later'}">${status==='pending'?'↩':'◷'}</button>${widgetsHTML(b,r,text)}${webLinks(text).map(link=>`<a class="external-link task-reference" data-web-link href="${escape(link.url)}" target="_blank" rel="noopener noreferrer">${escape(link.label)} ↗</a>`).join('')}${calculator?button('fuel-open',r.calculators?.fuel?'Recalculate fuel endurance →':'Calculate fuel endurance →','outline full calculator-link',`data-line="${b.line}"`):''}</div>`;
   }
   if(b.kind==='heading')return headingHTML(b);
   if(b.callout)return `<aside data-line="${b.line}" id="line-${b.line}" class="note callout ${b.callout} ${origin?'added':''}"><strong class="callout-label">${['caution','warning'].includes(b.callout)?'⚠':'ⓘ'} ${b.callout.toUpperCase()}</strong>${tag}<div>${renderInline(b.body)}</div></aside>`;
@@ -222,22 +314,28 @@ function runner(){
   const mismatch=runMismatch();
   if(r.offFlight)html+=`<div class="banner bad"><strong>Not the version for this flight.</strong> You opened it anyway.${button('versions-active','Choose the right version','outline full')}</div>`;
   else if(mismatch)html+=`<div class="banner bad"><strong>Today’s flight changed since you started this.</strong> Started for: ${escape(r.forLabel||'—')}. Now: ${escape(flightLabel(flight())||'—')}. ${mismatch.now?button('restart-run','Restart with the right version','danger full'):button('versions-active','See versions','outline full')}${button('keep-version','Keep using this one','quiet full')}</div>`;
+  const conflict=appliesToConflict(r.markdown,c.metadata);
+  if(conflict&&!r.conflictSeen)html+=`<div class="banner warn"><strong>Check this is the right document.</strong> Its text says “Applies to: ${escape(conflict.says.join(', '))}”, but it is filed as the ${escape(conflict.filed.join('/'))} version. Fix the file or its catalog entry.${button('conflict-seen','Got it — it’s the right one','quiet full')}</div>`;
   if(r.errors?.length)html+=`<div class="banner bad"><strong>${r.errors.length} change${r.errors.length===1?'':'s'} could not be applied.</strong> These items are missing from this run:<ul>${r.errors.map(e=>`<li>${escape(e)}</li>`).join('')}</ul></div>`;
   if(r.revision!==latest(c).id&&!mismatch)html+=`<div class="banner info">A newer version of this checklist is installed. You’re still using the one you started.${button('restart-run','Restart with the newer version','outline full')}</div>`;
   if(c.emergency&&state.returnTo)html+=button('return-normal','↩ Back to '+escape(state.checklists.find(x=>x.id===state.returnTo)?.title||'previous checklist'),'outline full');
   if(detailsOpen){
     html+=`<div class="card details"><h3>Why this version</h3><p><strong>${escape(r.versionLabel||'')}</strong></p><p class="help">Resolved for ${escape(r.forLabel||'no flight set')}.<br>${escape(c.sourceName||'')}</p>`;
     if(r.changes?.length)html+=`<h3>Changes layered on</h3><ul class="help">${r.changes.map(ch=>`<li><strong>${escape(ch.label)}</strong>: ${escape(ch.kind)} “${escape(ch.target)}”</li>`).join('')}</ul>`;
-    html+=`<div class="stack">${button('versions-active','Other versions','outline full')}${button('history','Revision history','outline full')}${button('export','Export Markdown','outline full')}${confirmAction==='restart'?`<div class="banner warn">Restart this checklist? Progress is cleared.<div class="row">${button('restart-run','Restart','danger')}${button('cancel','Cancel','outline')}</div></div>`:button('restart','Restart checklist…','quiet')}</div></div>`;
+    html+=`<div class="stack">${button('diff-active','What’s different? Compare versions','outline full')}${speechAvailable?button('toggle-speak',speakOn?'🔊 Read aloud: on':'🔈 Read aloud: off','outline full'):''}${button('versions-active','Other versions','outline full')}${button('history','Revision history','outline full')}${button('export','Export Markdown','outline full')}${confirmAction==='restart'?`<div class="banner warn">Restart this checklist? Progress is cleared.<div class="row">${button('restart-run','Restart','danger')}${button('cancel','Cancel','outline')}</div></div>`:button('restart','Restart checklist…','quiet')}</div></div>`;
   }
-  const blocks=parse(r.markdown,{plainLists:r.plainLists!==false});
-  let memoryLevel=null;
+  const blocks=parse(r.markdown,{plainLists:r.plainLists!==false}),t=tasks(r);
+  if(view==='glance'&&t.length&&!complete(r)&&!(mismatch||r.offFlight))return html+glanceHTML(blocks,r,c);
+  const memory=memoryLines(blocks);
+  // Document header (owner, revision, dates, source) folds into one quiet line.
+  const front=[];
   for(const b of blocks){
-    if(b.kind==='heading'){memoryLevel=/memory items|immediate action/i.test(b.text)?b.level:(memoryLevel!==null&&b.level>memoryLevel?memoryLevel:null);}
     if(b.kind==='heading'&&b.level===1&&b.text.trim()===c.title)continue;
-    html+=blockHTML(b,r,memoryLevel!==null&&b.kind==='task');
+    if(b.kind==='text'&&isFrontMatter(b.text)){if(!/^\s*-{3,}\s*$/.test(b.text))front.push(b.text.trim());continue;}
+    if(front.length){html+=frontMatterHTML(front);front.length=0;}
+    html+=blockHTML(b,r,memory.has(b.line));
   }
-  const t=tasks(r);
+  if(front.length)html+=frontMatterHTML(front);
   if(complete(r)){
     const next=nextFamily();
     html+=`<div class="card completion"><span class="success">✓</span><h2>All items checked.</h2><p class="help">Review any notes or conditional text before continuing.</p>${next?button('open-family',`Next: ${escape(next.title)} →`,'primary full',`data-key="${escape(next.key)}"`):button('home','Back to checklists','primary full')}</div>`;
@@ -262,12 +360,44 @@ function emergency(){
   if(!fams.length)html+='<p class="help">No emergency procedures installed.</p>';
   return html;
 }
+// "What's different?" — this checklist for today's aircraft, compared with its base version
+// or with another aircraft in the hangar.
+function diffPage(){
+  const f=familyOf(diffFor);if(!f){page='home';return home();}
+  const mine=resolveFamily(f);
+  let html=`<button type="button" class="back" data-action="${active()&&familyOfChecklist(active())?.key===f.key?'resume':'home'}">← Back</button><h1>What’s different?</h1><p class="subtitle">${escape(f.title)} for <strong>${escape(flight().tail||'this flight')}</strong></p>`;
+  if(mine.status!=='resolved')return html+`<div class="banner warn"><strong>No single version for this flight yet.</strong> ${statusHTML(mine)}</div>`;
+  const others=(state.hangar||[]).filter(a=>a.id!==flight().aircraftId);
+  html+=`<div class="chips compare">${button('diff-against','Base version',diffAgainst==='base'?'chip selected':'chip','data-value="base"')}${others.map(a=>button('diff-against',escape(a.tail),diffAgainst===a.id?'chip selected':'chip',`data-value="${escape(a.id)}"`)).join('')}</div>`;
+  let A,label;
+  if(diffAgainst==='base'||!aircraftOf(diffAgainst)){A=latest(mine.version.checklist).markdown;label=`the ${reason(mine.version)} base, without changes files`;}
+  else{
+    const a=aircraftOf(diffAgainst),fl=flightFrom(a,{rules:flight().rules,airfield:flight().airfield,conditions:flight().conditions}),theirs=resolve(f,fl);
+    if(theirs.status!=='resolved')return html+`<div class="banner warn"><strong>${escape(a.tail)} has no single version of this checklist.</strong> ${statusHTML(theirs)}</div>`;
+    A=composeWith(theirs);label=`${a.tail} (${reason(theirs.version)}${theirs.overlays.length?' + '+theirs.overlays.map(shortLabel).join(' + '):''})`;
+  }
+  const d=diff(A,composeWith(mine)),sum=summary(d);
+  html+=`<p class="help">Compared with ${escape(label)}.</p>`;
+  if(!sum.added&&!sum.removed&&!sum.moved)return html+`<div class="readiness good"><strong>✓ Identical</strong><span>Every item is the same.</span></div>`;
+  html+=`<div class="diff-summary"><span class="d-add">+${sum.added}<small>only for ${escape(flight().tail||'you')}</small></span><span class="d-del">−${sum.removed}<small>not on yours</small></span><span class="d-move">${sum.moved}<small>moved</small></span><span class="d-same">${sum.same}<small>same</small></span></div><div class="diff">`;
+  // Show every difference with its section; fold runs of identical items.
+  let same=0;const flush=()=>{if(same){html+=`<div class="d-fold">⋯ ${same} same item${same===1?'':'s'}</div>`;same=0;}};
+  for(const c of d){
+    if(c.row.kind==='heading'){flush();if(c.type!=='del')html+=`<h3 class="d-head">${escape(plain(c.row.text))}</h3>`;continue;}
+    if(c.type==='same'){same++;continue;}
+    flush();
+    html+=`<div class="d-row ${c.type}"><span class="d-sign" aria-hidden="true">${{add:'+',del:'−',move:'↕'}[c.type]}</span><span>${c.row.kind==='note'?'<em>Note:</em> ':''}${itemHTML(c.row.text)}${c.type==='move'?'<span class="d-tag">moved here</span>':''}</span><span class="sr-only">${{add:'only on yours',del:'not on yours',move:'in a different place'}[c.type]}</span></div>`;
+  }
+  flush();
+  return html+'</div>';
+}
 function settings(){
   const t=window.fliteTheme;
   return `<h1>Settings</h1><div class="card"><h3>Display</h3><div class="segmented">${[['auto','Auto'],['day','Day'],['night','Night'],['sun','Sun']].map(([v,l])=>button('set-theme',l,t.preference===v?'selected':'',`data-value="${v}" aria-pressed="${t.preference===v}"`)).join('')}</div><p class="help">Auto: Day 06:00–18:00, Night otherwise. Night is red on black to protect night vision. Sun is maximum contrast for direct sunlight.</p><h3>Text size</h3><div class="segmented">${[['m','Standard'],['l','Large'],['xl','Extra large']].map(([v,l])=>button('set-size',l,t.size===v?'selected':'',`data-value="${v}" aria-pressed="${t.size===v}"`)).join('')}</div></div>
+  <div class="card"><h3>Cockpit</h3><p class="help">Glance shows one item at a time — the whole card is the check button.</p><div class="segmented">${button('set-view','List',view==='list'?'selected':'',`data-value="list" aria-pressed="${view==='list'}"`)}${button('set-view','Glance',view==='glance'?'selected':'',`data-value="glance" aria-pressed="${view==='glance'}"`)}</div>${speechAvailable?`<p class="help">Read aloud speaks each item as it comes up, through your headset if it’s connected. Experimental.</p>${button('toggle-speak',speakOn?'🔊 Read aloud: on':'🔈 Read aloud: off','outline full')}`:''}</div>
   <div class="card stack"><h3>Aircraft & flight</h3>${button('hangar','Hangar','outline full')}${button('flight','Today’s flight','outline full')}</div>
   <div class="card stack"><h3>Checklists</h3>${button('library-import','Import / update checklists','outline full')}${button('setup','Offline, app updates & backup','outline full')}</div>
-  <p class="help">FliteChek Lab · Build ${BUILD} · experimental rethink branch</p>`;
+  <p class="help">FliteChek Lab · Build ${BUILD} · experimental sandbox</p>`;
 }
 
 // ---------- header & action bar ----------
@@ -283,7 +413,7 @@ function renderHeader(){
   }
   const r=run(),t=tasks(r),done=t.filter(b=>r.states[b.line]==='done').length,pending=t.filter(b=>r.states[b.line]==='pending').length;
   const mismatch=runMismatch()||r.offFlight;
-  header.innerHTML=`<div class="run-title-row"><h1>${escape(c.title)}</h1>${cycle}${button('details',detailsOpen?'✕':'•••','icon-button',`aria-label="${detailsOpen?'Close details':'Version details and options'}" aria-expanded="${detailsOpen}"`)}</div><button type="button" class="for-strip ${mismatch?'bad':''} ${c.emergency?'emergency':''}" data-action="details"><span class="for-label">FOR</span><span class="for-value">${escape(r.forLabel||'No flight set')}</span><span class="for-version">${escape(r.versionLabel||'')}${r.changes?.length?` · +${r.changes.length} changes`:''}</span></button><div class="progress" role="progressbar" aria-label="Checklist progress" aria-valuemin="0" aria-valuemax="${t.length||1}" aria-valuenow="${done}"><div style="width:${t.length?done/t.length*100:0}%"></div></div><div class="stat">${done} of ${t.length} checked${pending?` · ${pending} for later`:''}</div>`;
+  header.innerHTML=`<div class="run-title-row"><h1>${escape(c.title)}</h1>${cycle}${button('details',detailsOpen?'✕':'•••','icon-button',`aria-label="${detailsOpen?'Close details':'Version details and options'}" aria-expanded="${detailsOpen}"`)}</div><button type="button" class="for-strip ${mismatch?'bad':''} ${c.emergency?'emergency':''}" data-action="details"><span class="for-label">FOR</span><span class="for-value">${escape(r.forLabel||'No flight set')}</span><span class="for-version">${escape(r.versionLabel||'')}${r.changes?.length?` · +${r.changes.length} changes`:''}</span></button><div class="progress" role="progressbar" aria-label="Checklist progress" aria-valuemin="0" aria-valuemax="${t.length||1}" aria-valuenow="${done}"><div style="width:${t.length?done/t.length*100:0}%"></div></div><div class="run-meta"><span class="stat">${done} of ${t.length} checked${pending?` · ${pending} for later`:''}</span><span class="view-toggle" role="group" aria-label="View">${button('set-view','List',view==='list'?'selected':'',`data-value="list" aria-pressed="${view==='list'}"`)}${button('set-view','Glance',view==='glance'?'selected':'',`data-value="glance" aria-pressed="${view==='glance'}"`)}</span></div>`;
 }
 function renderBottom(){
   const nav=$('#bottom'),c=active();
@@ -300,23 +430,53 @@ function renderBottom(){
 function updateReturn(){
   const bar=$('#return-bar');
   const showUndo=page==='run'&&undo&&undo.id===state.active;
-  bar.hidden=page!=='run'||!run()||(current(run())===null&&!showUndo);
+  const glance=view==='glance'&&page==='run';
+  bar.hidden=page!=='run'||!run()||(glance?!showUndo:(current(run())===null&&!showUndo));
   if(bar.hidden)return;
   const r=run(),pending=tasks(r).find(t=>r.states[t.line]==='pending');
+  if(glance){bar.innerHTML=`<div class="row between"><span class="help">${escape(undo?.label||'')}</span>${button('undo','↶ Undo','undo-button')}</div>`;return;}
   bar.innerHTML=`<div class="row between">${current(r)!==null?button('current','↑ Current item','','id="current-button"'):'<span></span>'}${pending?button('jump-pending','◷ Later item','','data-line="'+pending.line+'"'):''}${showUndo?button('undo','↶ Undo','undo-button'):''}</div>`;
 }
-
 // ---------- check / undo ----------
 function setTask(line,action){
-  const r=run(),prev=r.states[line];
+  // Turbulence guard: ignore a second check within 450 ms (double taps, bounced fingers).
+  if(action==='done'&&Date.now()-lastCheckAt<450)return;
+  if(action==='done')lastCheckAt=Date.now();
+  const r=run(),prev=r.states[line],item=tasks(r).find(t=>t.line===line);
   if(!change(s=>setItem(s.runs[s.active],line,action)))return;
-  undo={id:state.active,line,prev};clearTimeout(undoTimer);undoTimer=setTimeout(()=>{undo=null;updateReturn();},8000);
-  if(action==='done'&&run().states[line]==='done'){const row=document.getElementById(`line-${line}`);row?.classList.add('just-checked');}
-  if(!active().emergency&&current(run())!==null)jump(automaticTarget(run()));
+  const label=(run().states[line]==='done'?'Checked: ':run().states[line]==='pending'?'Later: ':'Unchecked: ')+plain(challengeResponse(item?.text||'')?.challenge||item?.text||'');
+  undo={id:state.active,line,prev,label};clearTimeout(undoTimer);undoTimer=setTimeout(()=>{undo=null;updateReturn();},8000);
+  if(action==='done'&&run().states[line]==='done'){const row=document.getElementById(`line-${line}`);row?.classList.add('just-checked');haptic(12);}
+  if(view==='glance'){main.scrollTop=0;}
+  else if(!active().emergency&&current(run())!==null)jump(automaticTarget(run()));
   else if(complete(run()))main.scrollTo({top:main.scrollHeight,behavior:'instant'});
-  updateReturn();
+  updateReturn();speakCurrent();
+}
+const haptic=ms=>{try{navigator.vibrate?.(ms);}catch{}};
+
+// ---------- read aloud (on-device voices work offline) ----------
+const speechAvailable='speechSynthesis' in window&&'SpeechSynthesisUtterance' in window;
+function speakCurrent(){
+  if(!speakOn||!speechAvailable||page!=='run'||!run())return;
+  const r=run(),line=current(r);speechSynthesis.cancel();
+  if(line===null){speechSynthesis.speak(new SpeechSynthesisUtterance('Checklist complete.'));return;}
+  const text=fuelText(tasks(r).find(t=>t.line===line).text,r.calculators?.fuel),cr=challengeResponse(text);
+  const u=new SpeechSynthesisUtterance(cr?`${plain(cr.challenge)}. ${plain(cr.response)}.`:plain(text));u.rate=1.02;speechSynthesis.speak(u);
 }
 
+// ---------- item timers (in memory: a 30-second wait doesn't need to survive a restart) ----------
+let audio;
+function unlockAudio(){try{audio??=new (window.AudioContext||window.webkitAudioContext)();audio.resume?.();}catch{}}
+function beep(){try{unlockAudio();const t0=audio.currentTime;for(let i=0;i<3;i++){const o=audio.createOscillator(),g=audio.createGain();o.frequency.value=988;g.gain.setValueAtTime(0,t0+i*.25);g.gain.linearRampToValueAtTime(.3,t0+i*.25+.02);g.gain.exponentialRampToValueAtTime(.001,t0+i*.25+.2);o.connect(g).connect(audio.destination);o.start(t0+i*.25);o.stop(t0+i*.25+.22);}}catch{}}
+setInterval(()=>{
+  const now=Date.now();
+  for(const [key,t] of Object.entries(timers)){
+    const left=Math.max(0,Math.ceil((t.end-now)/1000));
+    const [id,line]=key.split(':');
+    if(id===state?.active&&page==='run'){const el=document.querySelector(`[data-timer="${line}"]`);if(el)el.textContent=left?clock(left):'TIME';}
+    if(!left&&!t.fired){t.fired=true;beep();haptic([200,100,200]);if(id===state?.active&&page==='run')render();}
+  }
+},250);
 // ---------- screen wake lock (runs only) ----------
 async function updateWakeLock(){
   try{
@@ -411,7 +571,7 @@ document.addEventListener('click',async e=>{
     case 'home':case 'settings':case 'hangar':case 'setup':case 'history':return go(action);
     case 'emergency':return go('emergency');
     case 'flight':flightDraft=null;editingAircraft=null;return go('flight');
-    case 'resume':go('run');restorePosition();return;
+    case 'resume':go('run');restorePosition();speakCurrent();return;
     case 'open-family':return openFamily(b.dataset.key);
     case 'open-version':return openFamily(b.dataset.key,{versionId:b.dataset.id});
     case 'ask-force':confirmAction='force:'+b.dataset.id;return render();
@@ -420,6 +580,14 @@ document.addEventListener('click',async e=>{
     case 'details':detailsOpen=!detailsOpen;confirmAction=null;render();if(detailsOpen)main.scrollTop=0;return;
     case 'restart':confirmAction='restart';return render();
     case 'restart-run':return restartActive();
+    case 'conflict-seen':return change(s=>{s.runs[s.active].conflictSeen=true;});
+    case 'set-view':view=b.dataset.value==='glance'?'glance':'list';try{localStorage.setItem(PREF.view,view);}catch{}render();if(page==='run'&&view==='list')restorePosition();return;
+    case 'toggle-speak':speakOn=!speakOn;try{localStorage.setItem(PREF.speak,speakOn?'on':'off');}catch{}render();if(speakOn)speakCurrent();else if(speechAvailable)speechSynthesis.cancel();return;
+    case 'diff-active':{const f=familyOfChecklist(active());if(f){diffFor=f.key;diffAgainst='base';go('diff');}return;}
+    case 'diff-family':diffFor=b.dataset.key;diffAgainst='base';return go('diff');
+    case 'diff-against':diffAgainst=b.dataset.value;return render();
+    case 'jump-phase':document.getElementById('phase-'+b.dataset.phase)?.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth'});return;
+    case 'timer':{unlockAudio();const key=state.active+':'+b.dataset.line;if(timers[key])delete timers[key];else timers[key]={end:Date.now()+Number(b.dataset.seconds)*1000};return render();}
     case 'show-mismatch':main.scrollTo({top:0,behavior:'instant'});return;
     case 'keep-version':{const m=runMismatch();if(m)change(s=>{s.runs[s.active].acknowledged=m.sig;});return;}
     case 'cycle-theme':{const order=['day','night','sun'],cur=document.documentElement.dataset.theme;window.fliteTheme.set(order[(order.indexOf(cur)+1)%order.length]);renderHeader();if(page==='settings')render();return;}
@@ -510,10 +678,11 @@ main.addEventListener('input',e=>{
     $('#no-results').hidden=!!count;
   }
 });
-main.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id==='flight-airfield'){e.preventDefault();e.target.blur();}});
+main.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.target.id==='flight-airfield'||e.target.dataset.valueLine!==undefined)){e.preventDefault();e.target.blur();}});
 document.addEventListener('change',e=>{
   if(e.target.id==='fuel-unit'){const unit=e.target.value;change(s=>{s.runs[s.active].fuelDraft={fuel:'',burn:'',unit};});}
   if(e.target.id==='flight-airfield'&&flightDraft)flightDraft.airfield=e.target.value.trim().toUpperCase();
+  if(e.target.dataset.valueLine!==undefined){const line=Number(e.target.dataset.valueLine),v=e.target.value.trim().slice(0,24);change(s=>{const r=s.runs[s.active];r.values??={};if(v)r.values[line]=v;else delete r.values[line];});}
 });
 $('#library-file').addEventListener('change',async e=>{
  const file=e.target.files[0];if(!file)return;
@@ -566,7 +735,7 @@ async function checkOffline(requestPersistence=false){
     await Promise.race([navigator.serviceWorker.ready,new Promise((_,reject)=>setTimeout(()=>reject(new Error('Offline setup timed out. Check the connection and try again.')),10000))]);
     if(requestPersistence&&navigator.storage?.persist)persistence=await navigator.storage.persist();
     else persistence=await navigator.storage?.persisted?.()??false;
-    const files=['./','./index.html','./style.css','./app.js','./core.js','./resolver.js','./overlay.js','./demo.js','./checklists.json'];
+    const files=['./','./index.html','./style.css','./app.js','./core.js','./resolver.js','./overlay.js','./demo.js','./smart.js','./diff.js','./checklists.json'];
     offlineReady=(await Promise.all(files.map(f=>caches.match(new URL(f,location.href).href)))).every(Boolean);
     if(!offlineReady)throw new Error('Offline files are not complete. Keep this app open while connected, then check again.');
     if(page==='setup')render();

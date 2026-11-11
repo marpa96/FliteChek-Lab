@@ -43,6 +43,44 @@ huge, uppercase and red-outlined. Free scrolling, one tap back to the checklist 
 (maximum contrast for direct sunlight), Auto by clock — one-tap toggle in the header. Text size:
 Standard / Large / Extra large. iPad and landscape get a two-column home.
 
+## Sandbox round 2 (tag `rethink-v1` is the build before this)
+
+**Smart items.** FliteChek reads how an item is written and picks the clearest display. Nothing in your
+Markdown changes.
+- `Master Switch -- OFF` (also ` - `, ` — `, ` → `) shows like a printed checklist:
+  `Master Switch ······ OFF`, with the action bold on the right. Long actions drop to their own line.
+- Values (`2100 - 2700 RPM`, `110 KIAS`, `121.5 MHz`) get a monospace badge. Transponder codes (`SET 7600`)
+  get a red code box.
+- A wait in the text ("within 30 seconds", "3 to 5 seconds") gets a tap-to-start timer that beeps.
+- `_____` blanks get a field to record the value, which then shows in the item.
+
+**Glance.** In a checklist, switch List → Glance. One item fills the screen, and the whole card is the
+check button, which is easier to hit in turbulence. Safety callouts that come right before an item show
+above it. Memory items are red and uppercase, and squawk codes show as big digit boxes. The undo bar says
+what you just did ("Checked: Ignition Switch"). A second check within 450 ms is ignored, so a bounced
+finger can't skip an item.
+
+**Flight timeline home.** Phase strip (Planning → Pre-Flight → Ground → In-Flight) with progress,
+**Next up** card for the next checklist, and a **readiness check**. Before you fly it lists any checklist,
+emergencies included, that has no single version for this flight, and any document whose own
+"Applies to" line disagrees with how it's filed. On your real library it already flags Lost Comms (IFR
+only), and on an IFR flight 7 checklists with no IFR version.
+
+**"What's different?"** From the ••• details or the versions page. Compares this checklist for your
+aircraft with its base version, or with any other aircraft in the hangar. It shows added, removed and
+moved items, and folds identical runs. For example, your C172S vs C172R pre-flight: +17, −19, 5 moved,
+38 the same.
+
+**Document checks.** A file whose text says "Applies to: C172R" but is catalogued as the C172S version
+gets a warning in the run and in readiness. That's your real C172S pre-flight today. The header
+(owner, revision, dates) folds into one quiet line.
+
+**Read aloud (experimental).** Settings → Cockpit, or •••. Speaks each item as it comes up, through
+your headset if one's connected. It uses on-device voices, so it works offline where iOS has them.
+
+**Offline guard.** `tests/offline-files.test.mjs` walks the real import graph and fails the build if
+any file the app loads is missing from the offline install list.
+
 Carried over unchanged: offline service worker, GitHub library updates & review, ZIP import, fuel
 endurance calculator, revision history, backup/restore, recovery screen.
 
