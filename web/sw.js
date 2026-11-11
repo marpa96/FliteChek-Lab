@@ -1,5 +1,5 @@
-const CACHE='flitechek-v23-publication-status';
-const FILES=['./navigation.js','./recovery.js','./links.js','./profile.js','./library-update.js','./catalog.js','./fuel.js','./startup.js','./update-entry.js','./theme.js','./','./index.html','./style.css','./app.js','./core.js','./checklists.json','./manifest.webmanifest','./icon.svg','./icon-192.png','./icon-512.png'];
+const CACHE='flitechek-lab-1';
+const FILES=['./resolver.js','./overlay.js','./demo.js','./navigation.js','./recovery.js','./links.js','./profile.js','./library-update.js','./catalog.js','./fuel.js','./startup.js','./update-entry.js','./theme.js','./','./index.html','./style.css','./app.js','./core.js','./checklists.json','./manifest.webmanifest','./icon.svg','./icon-192.png','./icon-512.png'];
 FILES.push(...["./launch/320-568-2-portrait.png", "./launch/320-568-2-landscape.png", "./launch/375-667-2-portrait.png", "./launch/375-667-2-landscape.png", "./launch/414-736-3-portrait.png", "./launch/414-736-3-landscape.png", "./launch/375-812-3-portrait.png", "./launch/375-812-3-landscape.png", "./launch/390-844-3-portrait.png", "./launch/390-844-3-landscape.png", "./launch/393-852-3-portrait.png", "./launch/393-852-3-landscape.png", "./launch/402-874-3-portrait.png", "./launch/402-874-3-landscape.png", "./launch/414-896-2-portrait.png", "./launch/414-896-2-landscape.png", "./launch/414-896-3-portrait.png", "./launch/414-896-3-landscape.png", "./launch/428-926-3-portrait.png", "./launch/428-926-3-landscape.png", "./launch/430-932-3-portrait.png", "./launch/430-932-3-landscape.png", "./launch/440-956-3-portrait.png", "./launch/440-956-3-landscape.png", "./launch/420-912-3-portrait.png", "./launch/420-912-3-landscape.png"]);
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(FILES))));
 // New versions wait until all app windows close; never reload a running checklist.
@@ -21,4 +21,4 @@ self.addEventListener('fetch',event=>{
 // Activated only from the dedicated update page after an explicit tap.
 self.addEventListener('message',event=>{if(event.data?.type==='APPLY_UPDATE')self.skipWaiting();});
 
-self.addEventListener('message',event=>{if(event.data?.type==='GET_BUILD')event.ports[0]?.postMessage({build:'23'});});
+self.addEventListener('message',event=>{if(event.data?.type==='GET_BUILD')event.ports[0]?.postMessage({build:'lab-1'});});

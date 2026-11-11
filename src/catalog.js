@@ -2,6 +2,8 @@ import {parseDocument} from 'yaml';
 import {unzipSync,strFromU8} from 'fflate';
 const MAX=8_000_000;
 const fields=['id','title','procedure','category','group','aircraft_models','flight_rules','tail_numbers','airfields','pilot','description','sequence','revision'];
+// Optional (rethink branch): who/what a version is for beyond the template, and base + changes.
+const optional=['group','operators','equipment','conditions','extends'];
 const fail=message=>{throw new Error(message);};
 export function checklistIDs(markdown){
  let fence=null,ids=[];
@@ -24,12 +26,14 @@ export function parseCatalog(text){
  const seen=new Set();
  for(const c of value.checklists){
   if(!c||typeof c!=='object'||Array.isArray(c))fail('Each catalog entry must be a mapping.');
-  if(Object.keys(c).some(k=>!fields.includes(k))||fields.some(k=>k!=='group'&&!(k in c)))fail('Every entry must use all fields in the standard template, with no unknown fields.');
+  if(Object.keys(c).some(k=>!fields.includes(k)&&!optional.includes(k))||fields.some(k=>!optional.includes(k)&&!(k in c)))fail('Every entry must use all fields in the standard template, with no unknown fields.');
   if(typeof c.id!=='string'||!/^\d{6}$/.test(c.id))fail('Checklist IDs must be quoted six-digit strings, such as "000123".');
   if(seen.has(c.id))fail('Duplicate catalog ID '+c.id);seen.add(c.id);
   for(const key of ['title','procedure'])if(typeof c[key]!=='string'||!c[key].trim())fail(c.id+': '+key+' is required.');
   if(!['normal','emergency'].includes(c.category))fail(c.id+': category must be normal or emergency.');
   for(const key of ['aircraft_models','flight_rules','tail_numbers','airfields'])if(!Array.isArray(c[key])||c[key].some(v=>typeof v!=='string'||!v.trim()||/^\[.*\]$/.test(v)))fail(c.id+': '+key+' must be a list of values, or [].');
+  for(const key of ['operators','equipment','conditions'])if(c[key]!==undefined&&(!Array.isArray(c[key])||c[key].some(v=>typeof v!=='string'||!v.trim()||v.length>60)))fail(c.id+': '+key+' must be a list of values, or [].');
+  if(c.extends!==undefined&&(typeof c.extends!=='string'||!c.extends.trim()))fail(c.id+': extends must name the base procedure.');
   if(c.group!==undefined&&(typeof c.group!=='string'||!c.group.trim()||c.group.length>100))fail(c.id+': invalid group.');
   if(c.group!==undefined&&((c.group==='Emergency')!==(c.category==='emergency')))fail(c.id+': Emergency group and category must agree.');
   if(c.flight_rules.some(v=>!['VFR','IFR','*'].includes(v)))fail(c.id+': flight_rules accepts VFR, IFR or *.');
@@ -37,6 +41,8 @@ export function parseCatalog(text){
   if(c.sequence!==null&&(!Number.isSafeInteger(c.sequence)||c.sequence<0))fail(c.id+': sequence must be a nonnegative integer or null.');
   if(!Number.isSafeInteger(c.revision)||c.revision<1)fail(c.id+': revision must be a positive integer.');
  }
+ const procedures=new Set(value.checklists.filter(c=>!c.extends).map(c=>c.procedure));
+ for(const c of value.checklists)if(c.extends&&!procedures.has(c.extends))fail(c.id+': extends “'+c.extends+'”, but no base checklist has that procedure.');
  return value;
 }
 export function validatePackage(pkg){
