@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Fetch the checklist source repo (some tests run its build script)
+        run: git clone --depth 1 https://github.com/marpa96/Flight-Checklists ../Flight-Checklists
       - run: npm ci
       - run: npm test
       - name: Stamp build
