@@ -1,0 +1,11 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {fuelEndurance,duration,fuelText,applyFuel,FUEL_LINK} from '../web/fuel.js';
+import {newState,openChecklist,restart,syncBundled,validateState} from '../web/core.js';
+const md=`- [ ] Keep this step\n- [ ] ${FUEL_LINK}\n- [ ] Endurance: {{fuel.endurance}}`;
+const seed={id:'mock',title:'Mock',variant:'Test',emergency:true,revisions:[{id:'r1',date:'2026-10-31T00:00:00Z',markdown:md}]};
+test('fuel endurance uses matching volume and hourly burn units',()=>{assert.equal(fuelEndurance('12','8').minutes,90);assert.equal(duration(90),'1 hr 30 min');assert.equal(fuelEndurance('0','8').minutes,0);assert.equal(fuelEndurance('1','7').minutes,8);assert.equal(fuelEndurance('0.3','0.1').minutes,180);});
+test('missing, negative, nonfinite and zero-burn values are rejected',()=>{for(const [fuel,burn] of [['','8'],['12',''],['12','0'],['-1','8'],['12','-2'],['x','8'],[Infinity,8],['12','Infinity']])assert.throws(()=>fuelEndurance(fuel,burn));});
+test('checklist text has explicit empty states and populated values',()=>{assert.equal(fuelText('{{fuel.endurance}}',null),'endurance not calculated');assert.equal(fuelText('{{fuel.amount}} / {{fuel.burn}} / {{fuel.endurance}}',{fuel:12,burn:8,unit:'US gal'}),'12 US gal / 8 US gal/hr / 1 hr 30 min');});
+test('applying numbers resets only dependent checks and preserves source',()=>{const run={markdown:md,states:{0:'done',1:'done',2:'done'}};applyFuel(run,{fuel:'12',burn:'8',unit:'L'});assert.deepEqual(run.states,{0:'done'});assert.equal(run.markdown,md);assert.equal(run.calculators.fuel.minutes,90);});
+test('results persist through backup roundtrip but clear on procedure restart',()=>{const s=newState([seed]);openChecklist(s,'mock');applyFuel(s.runs.mock,{fuel:12,burn:8,unit:'US gal'});const saved=validateState(JSON.parse(JSON.stringify(s)));assert.equal(saved.runs.mock.calculators.fuel.minutes,90);restart(saved);assert.equal(saved.runs.mock.calculators,undefined);});
+test('new bundled mock appears exactly once for existing users',()=>{const s=newState([]);assert.equal(syncBundled(s,[seed]),1);assert.equal(syncBundled(s,[seed]),0);assert.equal(s.checklists.length,1);});

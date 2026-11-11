@@ -1,0 +1,15 @@
+.DS_Store
+.local/
+test-output/
+node_modules/
+__pycache__/
+.build/
+build/
+*.ipa
+*.xcarchive
+xcuserdata/
+*.xcuserstate
+*.p12
+*.mobileprovision
+*.p8
+.env

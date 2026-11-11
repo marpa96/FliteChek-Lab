@@ -1,0 +1,14 @@
+# Copy this entry under checklists: in catalog.yaml.
+# Use the same ID in the Markdown: <!-- flitechek-id: 000123 -->
+- id: "000123"
+  title: "Pre-flight"
+  procedure: "preflight"
+  category: "normal"
+  aircraft_models: []
+  flight_rules: []
+  tail_numbers: []
+  airfields: []
+  pilot: null
+  description: null
+  sequence: null
+  revision: 1

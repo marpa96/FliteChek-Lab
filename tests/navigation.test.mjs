@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {updateURL} from '../web/navigation.js';
+test('installed update link preserves private access without carrying unrelated parameters',()=>{const u=new URL(updateURL('https://mac.local:8443/install?access=private-key&unused=1'));assert.equal(u.origin,'https://mac.local:8443');assert.equal(u.pathname,'/install');assert.equal(u.searchParams.get('access'),'private-key');assert.equal(u.searchParams.get('update'),'1');assert.equal(u.searchParams.has('unused'),false);});
+test('cookie-authenticated launch can still reach updater',()=>{assert.equal(updateURL('https://mac.local:8443/install'),'https://mac.local:8443/install?update=1');});
